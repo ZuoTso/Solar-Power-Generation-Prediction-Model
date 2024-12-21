@@ -3,8 +3,10 @@ import csv
 import pandas as pd
 import numpy as np
 
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, StackingRegressor
+from sklearn.linear_model import Ridge
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.model_selection import train_test_split, GridSearchCV, cross_val_score
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 
@@ -13,8 +15,33 @@ def data_acquisition():
     print("{:=^100s}".format(" Acquiring and reading data... "))
     dataframes = [pd.read_csv(f"./DS_Dataset/{file}") for file in os.listdir("./DS_Dataset")]
     source_data = pd.concat(dataframes, ignore_index=True)
-    y_test_data = pd.read_csv(f"./upload.csv")
-    return source_data, y_test_data
+    x_test_data = pd.read_csv(f"./upload.csv")
+    print("done")
+    return source_data, x_test_data
+
+# 3. Feature Engineering
+def feature_engineering(x_train, y_train, x_test):
+    print("{:=^100s}".format(" Performing feature engineering... "))
+
+    # Extract hours and minutes as new features
+    x_train['Hour'] = x_train['DateTime'].dt.hour
+    x_train['Minute'] = x_train['DateTime'].dt.minute
+    x_test['Hour'] = x_test['DateTime'].dt.hour
+    x_test['Minute'] = x_test['DateTime'].dt.minute
+    scaler = MinMaxScaler()
+    columns_to_scale = ['Minute', 'Hour']
+    x_train[columns_to_scale] = scaler.fit_transform(x_train[columns_to_scale])
+    x_test[columns_to_scale] = scaler.fit_transform(x_test[columns_to_scale])
+
+    #drop DateTime
+    x_train = x_train.drop(columns=['DateTime'])
+    x_test = x_test.drop(columns=['DateTime'])
+
+    x_train_scaled = x_train
+    y_train_scaled = y_train
+    x_test_scaled = x_test
+
+    return x_train_scaled, y_train_scaled, x_test_scaled
 
 # 2. Data Preprocessing
 def data_preprocessing(data, x_test):
@@ -35,10 +62,26 @@ def data_preprocessing(data, x_test):
     aggregated_data = aggregate_data(data)
 
     aggregated_data = add_serial_number(aggregated_data)
-    processed_x_test, real_train_data = generate_x_test(x_test, aggregated_data)
-    x_train = real_train_data.drop(columns=['Power(mW)'])
-    y_train = real_train_data['Power(mW)']
-    return x_train, y_train, processed_x_test
+
+    all_processed_x_test = []
+    all_x_train = []
+    all_y_train = []
+    x_test_chunks = [x_test.iloc[i:i + 48] for i in range(0, len(x_test), 48)]
+    for chunk in enumerate(x_test_chunks):
+        processed_x_test, real_train_data = generate_x_test(chunk, aggregated_data)
+        x_train = real_train_data.drop(columns=['Power(mW)'])
+        y_train = real_train_data['Power(mW)']
+
+        # 3. Perform feature engineering
+        x_train_scaled, y_train_scaled, x_test_scaled = feature_engineering(x_train, y_train, processed_x_test)
+
+        all_x_train.append(x_train_scaled)
+        all_y_train.append(y_train_scaled)
+        all_processed_x_test.append(x_test_scaled)
+
+        print("done")
+
+    return all_x_train, all_y_train, all_processed_x_test
 
 def aggregate_data(data, is_target=False):
     print("{:=^100s}".format(" Aggregating data... "))
@@ -108,23 +151,14 @@ def generate_x_test(upload, aggregated_data):
     real_train_data = aggregated_data.drop(index=matched_indices)
     real_train_data = aggregated_data.drop(columns=['MatchKey'])
 
+    print("done")
     return x_test, real_train_data
-
-# 3. Feature Engineering
-def feature_engineering(x_train, y_train, x_test):
-    print("{:=^100s}".format(" Performing feature engineering... "))
-
-    x_train_scaled = x_train
-    y_train_scaled = y_train
-    x_test_scaled = x_test
-
-    return x_train_scaled, y_train_scaled, x_test_scaled
 
 # 4. Model Training
 def model_training(x_train, y_train):
     print("{:=^100s}".format(" Training model... "))
 
-    features = ['LocationCode', 'WindSpeed(m/s)', 'Pressure(hpa)', 'Temperature(°C)', 'Humidity(%)', 'Sunlight(Lux)']
+    features = ['WindSpeed(m/s)', 'Pressure(hpa)', 'Temperature(°C)', 'Humidity(%)', 'Sunlight(Lux)', 'Hour', 'Minute']
     # target = 'Power(mW)'
     x_train = x_train[features]
     x_splitted_train, x_splitted_test, y_splitted_train, y_splitted_test = train_test_split(x_train, y_train, test_size=0.2, random_state=42)
@@ -150,8 +184,5 @@ source_data, x_test = data_acquisition()
 # 2. Preprocess data
 x_train, y_train, processed_x_test = data_preprocessing(source_data, x_test)
 
-# 3. Perform feature engineering
-x_train_scaled, y_train_scaled, x_test_scaled = feature_engineering(x_train, y_train, processed_x_test)
-
 # 4. Train the model
-model = model_training(x_train_scaled, y_train_scaled)
+# model = model_training(x_train, y_train)
