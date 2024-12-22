@@ -67,7 +67,7 @@ def data_preprocessing(data, x_test):
     all_x_train = []
     all_y_train = []
     x_test_chunks = [x_test.iloc[i:i + 48] for i in range(0, len(x_test), 48)]
-    for chunk in enumerate(x_test_chunks):
+    for idx, chunk in enumerate(x_test_chunks):
         processed_x_test, real_train_data = generate_x_test(chunk, aggregated_data)
         x_train = real_train_data.drop(columns=['Power(mW)'])
         y_train = real_train_data['Power(mW)']
@@ -139,17 +139,52 @@ def add_serial_number(data):
 def generate_x_test(upload, aggregated_data):
     print("{:=^100s}".format(" Processing x_test... "))
 
+    upload = upload.copy()
     upload['MatchKey'] = upload['序號'].astype(str).str[:12]
     aggregated_data['MatchKey'] = aggregated_data['序號'].str[:12]
 
     matched_data = pd.merge(upload, aggregated_data, on='MatchKey', how='inner', suffixes=('_upload', '_aggregated'))
-    matched_indices = matched_data.index
+    
+    # Handling missing matching data
+    if matched_data.empty:
+        print("{:=^100s}".format("No matching data for {upload['DateTime'].iloc[0].date()} at location {upload['LocationCode'].iloc[0]}. Filling with average values..."))
+        
+        # Extract time information from serial number
+        upload['DateTime'] = pd.to_datetime(upload['DateTime'], format='%Y-%m-%d %H:%M:%S')
+        upload['Week'] = upload['DateTime'].dt.isocalendar().week
+        upload['Hour'] = upload['DateTime'].dt.hour
+        upload['Minute'] = upload['DateTime'].dt.minute
+        
+        # Find the average of the same time period
+        week = upload['Week'].iloc[0]
+        hour = upload['Hour'].iloc[0]
+        minute = upload['Minute'].iloc[0]
 
+        # Filter out data with the same LocationCode, Week, Hour and Minute
+        filtered_data = aggregated_data[
+            (aggregated_data['DateTime'].dt.isocalendar().week == week) &
+            (aggregated_data['DateTime'].dt.hour == hour) &
+            (aggregated_data['DateTime'].dt.minute == minute)
+        ]
+
+        # Calculate average
+        if not filtered_data.empty:
+            avg_values = filtered_data.mean()
+            for col in ['WindSpeed(m/s)', 'Pressure(hpa)', 'Temperature(°C)', 'Humidity(%)', 'Sunlight(Lux)', 'Power(mW)']:
+                upload[col] = avg_values[col]
+        else:
+            print("{:=^100s}".format("Warning: No data available to fill for Week {week}, Hour {hour}, Minute {minute}."))
+            upload[['WindSpeed(m/s)', 'Pressure(hpa)', 'Temperature(°C)', 'Humidity(%)', 'Sunlight(Lux)']] = np.nan  # 可根據需求調整為 0 或其他值
+
+        return upload, aggregated_data
+
+    # If the match is successful, process the matched data
+    matched_indices = matched_data.index
     x_test = matched_data.drop(columns=['答案', '序號_aggregated', 'MatchKey', 'Power(mW)'])
     x_test.rename(columns={'序號_upload': '序號'}, inplace=True)
 
     real_train_data = aggregated_data.drop(index=matched_indices)
-    real_train_data = aggregated_data.drop(columns=['MatchKey'])
+    real_train_data = real_train_data.drop(columns=['MatchKey'])
 
     print("done")
     return x_test, real_train_data

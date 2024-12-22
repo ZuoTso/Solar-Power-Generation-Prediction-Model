@@ -36,7 +36,6 @@ def feature_engineering(x_train, y_train, x_test):
     else:
         x_test[columns_to_scale] = scaler.fit_transform(x_test[columns_to_scale])
 
-
     #drop DateTime
     x_train = x_train.drop(columns=['DateTime'])
     x_test = x_test.drop(columns=['DateTime'])
@@ -124,28 +123,31 @@ def data_preprocessing(data, x_test):
 def split_data(data):
     '''
     Treat the morning data with missing afternoon data days as test input, and the rest as training data.
-    '''
-#     print("{:=^100s}".format(" Splitting data into train and test sets... "))
-#     data['Date'] = data['DateTime'].dt.date
-#     data['Time'] = data['DateTime'].dt.time
+    
+    print("{:=^100s}".format(" Splitting data into train and test sets... "))
+    data['Date'] = data['DateTime'].dt.date
+    data['Time'] = data['DateTime'].dt.time
 
-#     x_train, y_train, x_test, y_weatherData = [], [], [], []
+    x_train, y_train, x_test, y_weatherData = [], [], [], []
 
-#     for (location, date), group in data.groupby(['LocationCode', 'Date']):
-#         morning_data = group[group['DateTime'].dt.hour < 9]
-#         afternoon_data = group[(group['DateTime'].dt.hour >= 9) & (group['DateTime'].dt.hour < 17)]
+    for (location, date), group in data.groupby(['LocationCode', 'Date']):
+        morning_data = group[group['DateTime'].dt.hour < 9]
+        afternoon_data = group[(group['DateTime'].dt.hour >= 9) & (group['DateTime'].dt.hour < 17)]
         
-#         if afternoon_data.empty and not morning_data.empty:
-#             x_test.append(morning_data.drop(['Time', 'Date'], axis=1))
-#         else:
-#             x_train.append(morning_data.drop(['Time', 'Date'], axis=1))
-#             y_train.append(afternoon_data[['LocationCode', 'DateTime', 'Power(mW)']])
-#             y_weatherData.append(afternoon_data.drop(['Time', 'Date'], axis=1))
+        if afternoon_data.empty and not morning_data.empty:
+            x_test.append(morning_data.drop(['Time', 'Date'], axis=1))
+        else:
+            x_train.append(morning_data.drop(['Time', 'Date'], axis=1))
+            y_train.append(afternoon_data[['LocationCode', 'DateTime', 'Power(mW)']])
+            y_weatherData.append(afternoon_data.drop(['Time', 'Date'], axis=1))
 
-#     x_train = pd.concat(x_train).reset_index(drop=True)
-#     y_train = pd.concat(y_train).reset_index(drop=True)
-#     x_test = pd.concat(x_test).reset_index(drop=True)
-#     y_weatherData = pd.concat(y_weatherData).reset_index(drop=True)
+    x_train = pd.concat(x_train).reset_index(drop=True)
+    y_train = pd.concat(y_train).reset_index(drop=True)
+    x_test = pd.concat(x_test).reset_index(drop=True)
+    y_weatherData = pd.concat(y_weatherData).reset_index(drop=True)
+    '''
+
+    return 0 # x_train, y_train, x_test, y_weatherData
 
     return 0 # x_train, y_train, x_test, y_weatherData
 
@@ -208,23 +210,121 @@ def generate_x_test(upload, aggregated_data):
     # print("{:=^100s}".format(" Processing x_test... "))
 
     upload = upload.copy()
-    upload.loc[:, 'MatchKey'] = upload['序號'].astype(str).str[:12]
+    aggregated_data = aggregated_data.copy()
+
+    upload['MatchKey'] = upload['序號'].astype(str).str[:12]
     aggregated_data['MatchKey'] = aggregated_data['序號'].str[:12]
 
     matched_data = pd.merge(upload, aggregated_data, on='MatchKey', how='inner', suffixes=('_upload', '_aggregated'))
-    matched_indices = matched_data.index
+    
+    # Handling missing matching data
+    if matched_data.empty:
+        # 從序號中提取時間和地點信息
+        upload['序號'] = upload['序號'].astype(str)
+        upload['Year'] = upload['序號'].str[:4].astype(int)
+        upload['Month'] = upload['序號'].str[4:6].astype(int)
+        upload['Day'] = upload['序號'].str[6:8].astype(int)
+        upload['Hour'] = upload['序號'].str[8:10].astype(int)
+        upload['Minute'] = upload['序號'].str[10:12].astype(int)
+        upload['LocationCode'] = upload['序號'].str[12:14]
 
+        # Create DateTime column
+        upload['DateTime'] = pd.to_datetime(upload[['Year', 'Month', 'Day', 'Hour', 'Minute']])
+
+        # Fill missing data with average from preceding and following three days
+        filled_data = []
+        for _, row in upload.iterrows():
+            target_time = row['DateTime']
+
+            # Define time range for +/- 3 days
+            start_date = target_time - pd.Timedelta(days=3)
+            end_date = target_time + pd.Timedelta(days=3)
+
+            # Filter aggregated_data for the same hour and minute in the time range
+            relevant_data = aggregated_data[
+                (aggregated_data['DateTime'] >= start_date) &
+                (aggregated_data['DateTime'] <= end_date) &
+                (aggregated_data['DateTime'].dt.hour == target_time.hour) &
+                (aggregated_data['DateTime'].dt.minute == target_time.minute)
+            ]
+
+            if not relevant_data.empty:
+                avg_values = relevant_data.select_dtypes(include=[np.number]).mean()
+                filled_row = row.to_dict()
+                for col in avg_values.index:
+                    filled_row[col] = avg_values[col]
+                filled_data.append(filled_row)
+            else:
+                print(f"Warning: No data available to fill for {target_time}. Filling with NaN.")
+                filled_row = row.to_dict()
+                for col in aggregated_data.select_dtypes(include=[np.number]).columns:
+                    filled_row[col] = np.nan
+                filled_data.append(filled_row)
+
+        upload = pd.DataFrame(filled_data)
+        x_test = upload.drop(columns=['答案', 'MatchKey', 'Power(mW)', 'Year', 'Month', 'Day', 'Hour', 'Minute'])
+        real_train_data = aggregated_data.drop(columns=['MatchKey'])
+
+        print("Data filled with averages from +/- 3 days.")
+        return x_test, real_train_data
+
+    # If the match is successful, process the matched data
+    matched_indices = matched_data.index
     x_test = matched_data.drop(columns=['答案', '序號_aggregated', 'MatchKey', 'Power(mW)'])
     x_test.rename(columns={'序號_upload': '序號'}, inplace=True)
 
     real_train_data = aggregated_data.drop(index=matched_indices)
-    real_train_data = aggregated_data.drop(columns=['MatchKey'])
+    real_train_data = real_train_data.drop(columns=['MatchKey'])
 
     # print("done")
     return x_test, real_train_data
 
-# 4. Model Training
+# All 'temp' are for testing and can be deleted after testing.
+# 4. Model Training Random Forest temp
 def model_training(all_x_train, all_y_train):
+    print("{:=^100s}".format(" Training model... "))
+
+    features = ['WindSpeed(m/s)', 'Pressure(hpa)', 'Temperature(°C)', 'Humidity(%)', 'Sunlight(Lux)', 'Hour', 'Minute']
+
+    # Define the Random Forest model
+    random_forest_model = RandomForestRegressor(random_state=42, n_estimators=100)
+
+    # List to store models for each dataset
+    trained_models = []
+
+    for i, (x_train, y_train) in enumerate(zip(all_x_train, all_y_train)):
+
+        # if i != 1: # specific_idx temp
+        #     continue  # 跳過不需要的組 temp
+        print(f"Dataset {i + 1}:")
+
+        # Filter the features
+        x_train = x_train[features]
+        x_splitted_train, x_splitted_test, y_splitted_train, y_splitted_test = train_test_split(
+            x_train, y_train, test_size=0.2, random_state=42
+        )
+
+        # Train and evaluate the Random Forest model
+        # print("{:=^100s}".format(" Training Random Forest... "))
+        random_forest_model.fit(x_splitted_train, y_splitted_train)
+        y_pred = random_forest_model.predict(x_splitted_test)
+        mae = mean_absolute_error(y_splitted_test, y_pred)
+        print(f"Random Forest {i + 1} Split MAE: {mae:.2f}")
+
+        # Append the trained model for this dataset
+        trained_models.append({'Random Forest': random_forest_model})
+
+
+        # for a in range(199):    # temp
+        #     trained_models.append({'Random Forest': random_forest_model})   # temp
+        # return trained_models # temp
+
+    print("done")
+
+    return trained_models
+
+# 4. Model Training
+def model_training_stop(all_x_train, all_y_train):
     print("{:=^100s}".format(" Training model... "))
 
     features = ['WindSpeed(m/s)', 'Pressure(hpa)', 'Temperature(°C)', 'Humidity(%)', 'Sunlight(Lux)', 'Hour', 'Minute']
@@ -300,22 +400,24 @@ def model_evaluation(trained_models, all_test_data):
     # Store aggregated results for all datasets
     aggregated_results = []
     for i, (models, test_data) in enumerate(zip(trained_models, all_test_data)):
-        print(f"Evaluating on Test Dataset {i + 1}:")
+        # print(f"Evaluating on Test Dataset {i + 1}:")
         test_data = test_data.copy()
         
         # Evaluate the stacking model
-        stacking_model = models['Stacking Model']
+        # stacking_model = models['Stacking Model']
+        stacking_model = models['Random Forest']
         test_data["答案"] = stacking_model.predict(test_data[features])
         # Aggregate results by "序號"
         aggregated_result = (
             test_data.groupby('序號', sort=False)['答案']
             .mean()
+            .round(2)
             .reset_index()
         )
 
         aggregated_results.append(aggregated_result)
 
-        print(f"Dataset {i + 1} evaluation completed.")
+        # print(f"Dataset {i + 1} evaluation completed.")
 
     print("done")
     return aggregated_results
